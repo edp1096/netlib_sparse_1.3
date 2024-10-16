@@ -63,47 +63,50 @@ static char RCSid[] =
 
 
 
-
-
+#if TRANSPOSE AND spCOMPLEX
 /*
- *  SOLVE MATRIX EQUATION
+ *  SOLVE COMPLEX TRANSPOSED MATRIX EQUATION
  *
  *  Performs forward elimination and back substitution to find the
- *  unknown vector from the RHS vector and factored matrix.  This
- *  routine assumes that the pivots are associated with the lower
- *  triangular (L) matrix and that the diagonal of the upper triangular
- *  (U) matrix consists of ones.  This routine arranges the computation
- *  in different way than is traditionally used in order to exploit the
- *  sparsity of the right-hand side.  See the reference in spRevision.
+ *  unknown vector from the RHS vector and transposed factored
+ *  matrix. This routine is useful when performing sensitivity analysis
+ *  on a circuit using the adjoint method.  This routine assumes that
+ *  the pivots are associated with the untransposed lower triangular
+ *  (L) matrix and that the diagonal of the untransposed upper
+ *  triangular (U) matrix consists of ones.
  *
  *  >>> Arguments:
  *  Matrix  <input>  (char *)
  *      Pointer to matrix.
  *  RHS  <input>  (RealVector)
- *      RHS is the input data array, the right hand side. This data is
- *      undisturbed and may be reused for other solves.
+ *      RHS is the input data array, the right hand
+ *      side. This data is undisturbed and may be reused for other solves.
+ *      This vector is only the real portion if the matrix is complex and
+ *      spSEPARATED_COMPLEX_VECTORS is set true.
  *  Solution  <output>  (RealVector)
- *      Solution is the output data array. This routine is constructed such that
- *      RHS and Solution can be the same array.
+ *      Solution is the real portion of the output data array. This routine
+ *      is constructed such that RHS and Solution can be the same array.
+ *      This vector is only the real portion if the matrix is complex and
+ *      spSEPARATED_COMPLEX_VECTORS is set true.
  *  iRHS  <input>  (RealVector)
  *      iRHS is the imaginary portion of the input data array, the right
  *      hand side. This data is undisturbed and may be reused for other solves.
- *      This argument is only necessary if matrix is complex and if
- *      spSEPARATED_COMPLEX_VECTOR is set true.
+ *      If either spCOMPLEX or spSEPARATED_COMPLEX_VECTOR is set false, there
+ *      is no need to supply this array.
  *  iSolution  <output>  (RealVector)
  *      iSolution is the imaginary portion of the output data array. This
  *      routine is constructed such that iRHS and iSolution can be
- *      the same array.  This argument is only necessary if matrix is complex
- *      and if spSEPARATED_COMPLEX_VECTOR is set true.
+ *      the same array.  If spCOMPLEX or spSEPARATED_COMPLEX_VECTOR is set
+ *      false, there is no need to supply this array.
  *
  *  >>> Local variables:
- *  Intermediate  (RealVector)
+ *  Intermediate  (ComplexVector)
  *      Temporary storage for use in forward elimination and backward
  *      substitution.  Commonly referred to as c, when the LU factorization
- *      equations are given as  Ax = b, Lc = b, Ux = c Local version of
- *      Matrix->Intermediate, which was created during the initial
- *      factorization in function CreateInternalVectors() in the matrix
- *      factorization module.
+ *      equations are given as  Ax = b, Lc = b, Ux = c.  Local version of
+ *      Matrix->Intermediate, which was created during
+ *      the initial factorization in function CreateInternalVectors() in the
+ *      matrix factorization module.
  *  pElement  (ElementPtr)
  *      Pointer used to address elements in both the lower and upper triangle
  *      matrices.
@@ -115,7 +118,7 @@ static char RCSid[] =
  *      Pointer that points to current pivot or diagonal element.
  *  Size  (int)
  *      Size of matrix. Made local to reduce indirection.
- *  Temp  (RealNumber)
+ *  Temp  (ComplexNumber)
  *      Temporary storage for entries in arrays.
  *
  *  >>> Obscure Macros
@@ -125,92 +128,97 @@ static char RCSid[] =
  *      without a trace.
  */
 
-/*VARARGS3*/
-
-void
-spsolve( eMatrix, RHS, Solution IMAG_VECTORS )
-
-char *eMatrix;
+static void SolveComplexTransposedMatrix(Matrix, RHS, Solution IMAG_VECTORS )
+MatrixPtr  Matrix;
 RealVector  RHS, Solution IMAG_VECTORS;
 {
-MatrixPtr  Matrix = (MatrixPtr)eMatrix;
 register  ElementPtr  pElement;
-register  RealVector  Intermediate;
-register  RealNumber  Temp;
+register  ComplexVector  Intermediate;
 register  int  I, *pExtOrder, Size;
+register  ComplexVector  ExtVector;
 ElementPtr  pPivot;
-void SolveComplexMatrix();
+ComplexNumber  Temp;
 
-/* Begin `spsolve'. */
-    ASSERT( IS_VALID(Matrix) AND IS_FACTORED(Matrix) );
+/* Begin `SolveComplexTransposedMatrix'. */
 
-#if spCOMPLEX
-    if (Matrix->Complex)
-    {   SolveComplexMatrix( Matrix, RHS, Solution IMAG_VECTORS );
-        return;
-    }
-#endif
-
-#if REAL
-    Intermediate = Matrix->Intermediate;
     Size = Matrix->Size;
+    Intermediate = (ComplexVector)Matrix->Intermediate;
 
 /* Correct array pointers for ARRAY_OFFSET. */
 #if NOT ARRAY_OFFSET
-    --RHS;
-    --Solution;
+#if spSEPARATED_COMPLEX_VECTORS
+    --RHS;      --iRHS;
+    --Solution; --iSolution;
+#else
+    RHS -= 2;   Solution -= 2;
+#endif
 #endif
 
 /* Initialize Intermediate vector. */
-    pExtOrder = &Matrix->IntToExtRowMap[Size];
+    pExtOrder = &Matrix->IntToExtColMap[Size];
+
+#if spSEPARATED_COMPLEX_VECTORS
     for (I = Size; I > 0; I--)
-        Intermediate[I] = RHS[*(pExtOrder--)];
+    {   Intermediate[I].Real = RHS[*(pExtOrder)];
+        Intermediate[I].Imag = iRHS[*(pExtOrder--)];
+    }
+#else
+    ExtVector = (ComplexVector)RHS;
+    for (I = Size; I > 0; I--)
+        Intermediate[I] = ExtVector[*(pExtOrder--)];
+#endif
 
-/* Forward elimination. Solves Lc = b.*/
+/* Forward elimination. */
     for (I = 1; I <= Size; I++)
-    {   
-/* This step of the elimination is skipped if Temp equals zero. */
-        if ((Temp = Intermediate[I]) != 0.0)
-        {   pPivot = Matrix->Diag[I];
-            Intermediate[I] = (Temp *= pPivot->Real);
+    {   Temp = Intermediate[I];
 
-            pElement = pPivot->NextInCol;
+/* This step of the elimination is skipped if Temp equals zero. */
+        if ((Temp.Real != 0.0) OR (Temp.Imag != 0.0))
+        {   pElement = Matrix->Diag[I]->NextInRow;
             while (pElement != NULL)
-            {   Intermediate[pElement->Row] -= Temp * pElement->Real;
-                pElement = pElement->NextInCol;
+            {
+/* Cmplx expr: Intermediate[Element->Col] -= Temp * *Element. */
+                CMPLX_MULT_SUBT_ASSIGN( Intermediate[pElement->Col],
+                                        Temp, *pElement);
+                pElement = pElement->NextInRow;
             }
         }
     }
 
-/* Backward Substitution. Solves Ux = c.*/
+/* Backward Substitution. */
     for (I = Size; I > 0; I--)
-    {   Temp = Intermediate[I];
-        pElement = Matrix->Diag[I]->NextInRow;
+    {   pPivot = Matrix->Diag[I];
+        Temp = Intermediate[I];
+        pElement = pPivot->NextInCol;
+
         while (pElement != NULL)
-        {   Temp -= pElement->Real * Intermediate[pElement->Col];
-            pElement = pElement->NextInRow;
+        {
+/* Cmplx expr: Temp -= Intermediate[Element->Row] * *Element. */
+            CMPLX_MULT_SUBT_ASSIGN(Temp,Intermediate[pElement->Row],*pElement);
+
+            pElement = pElement->NextInCol;
         }
-        Intermediate[I] = Temp;
+/* Cmplx expr: Intermediate = Temp * (1.0 / *pPivot). */
+        CMPLX_MULT(Intermediate[I], Temp, *pPivot);
     }
 
 /* Unscramble Intermediate vector while placing data in to Solution vector. */
-    pExtOrder = &Matrix->IntToExtColMap[Size];
+    pExtOrder = &Matrix->IntToExtRowMap[Size];
+
+#if spSEPARATED_COMPLEX_VECTORS
     for (I = Size; I > 0; I--)
-        Solution[*(pExtOrder--)] = Intermediate[I];
+    {   Solution[*(pExtOrder)] = Intermediate[I].Real;
+        iSolution[*(pExtOrder--)] = Intermediate[I].Imag;
+    }
+#else
+    ExtVector = (ComplexVector)Solution;
+    for (I = Size; I > 0; I--)
+        ExtVector[*(pExtOrder--)] = Intermediate[I];
+#endif
 
     return;
-#endif /* REAL */
 }
-
-
-
-
-
-
-
-
-
-
+#endif /* TRANSPOSE AND spCOMPLEX */
 
 
 #if spCOMPLEX
@@ -275,9 +283,7 @@ void SolveComplexMatrix();
  *      without a trace.
  */
 
-static void
-SolveComplexMatrix( Matrix, RHS, Solution IMAG_VECTORS )
-
+static void SolveComplexMatrix( Matrix, RHS, Solution IMAG_VECTORS )
 MatrixPtr  Matrix;
 RealVector  RHS, Solution IMAG_VECTORS;
 {
@@ -371,19 +377,6 @@ ComplexNumber  Temp;
 #endif /* spCOMPLEX */
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 #if TRANSPOSE
 /*
  *  SOLVE TRANSPOSED MATRIX EQUATION
@@ -447,9 +440,7 @@ ComplexNumber  Temp;
 
 /*VARARGS3*/
 
-void
-spSolveTransposed( eMatrix, RHS, Solution IMAG_VECTORS )
-
+void spSolveTransposed( eMatrix, RHS, Solution IMAG_VECTORS )
 char *eMatrix;
 RealVector  RHS, Solution IMAG_VECTORS;
 {
@@ -524,58 +515,45 @@ void SolveComplexTransposedMatrix();
 
 
 
-
-
-
-
-
-
-
-
-#if TRANSPOSE AND spCOMPLEX
 /*
- *  SOLVE COMPLEX TRANSPOSED MATRIX EQUATION
+ *  SOLVE MATRIX EQUATION
  *
  *  Performs forward elimination and back substitution to find the
- *  unknown vector from the RHS vector and transposed factored
- *  matrix. This routine is useful when performing sensitivity analysis
- *  on a circuit using the adjoint method.  This routine assumes that
- *  the pivots are associated with the untransposed lower triangular
- *  (L) matrix and that the diagonal of the untransposed upper
- *  triangular (U) matrix consists of ones.
+ *  unknown vector from the RHS vector and factored matrix.  This
+ *  routine assumes that the pivots are associated with the lower
+ *  triangular (L) matrix and that the diagonal of the upper triangular
+ *  (U) matrix consists of ones.  This routine arranges the computation
+ *  in different way than is traditionally used in order to exploit the
+ *  sparsity of the right-hand side.  See the reference in spRevision.
  *
  *  >>> Arguments:
  *  Matrix  <input>  (char *)
  *      Pointer to matrix.
  *  RHS  <input>  (RealVector)
- *      RHS is the input data array, the right hand
- *      side. This data is undisturbed and may be reused for other solves.
- *      This vector is only the real portion if the matrix is complex and
- *      spSEPARATED_COMPLEX_VECTORS is set true.
+ *      RHS is the input data array, the right hand side. This data is
+ *      undisturbed and may be reused for other solves.
  *  Solution  <output>  (RealVector)
- *      Solution is the real portion of the output data array. This routine
- *      is constructed such that RHS and Solution can be the same array.
- *      This vector is only the real portion if the matrix is complex and
- *      spSEPARATED_COMPLEX_VECTORS is set true.
+ *      Solution is the output data array. This routine is constructed such that
+ *      RHS and Solution can be the same array.
  *  iRHS  <input>  (RealVector)
  *      iRHS is the imaginary portion of the input data array, the right
  *      hand side. This data is undisturbed and may be reused for other solves.
- *      If either spCOMPLEX or spSEPARATED_COMPLEX_VECTOR is set false, there
- *      is no need to supply this array.
+ *      This argument is only necessary if matrix is complex and if
+ *      spSEPARATED_COMPLEX_VECTOR is set true.
  *  iSolution  <output>  (RealVector)
  *      iSolution is the imaginary portion of the output data array. This
  *      routine is constructed such that iRHS and iSolution can be
- *      the same array.  If spCOMPLEX or spSEPARATED_COMPLEX_VECTOR is set
- *      false, there is no need to supply this array.
+ *      the same array.  This argument is only necessary if matrix is complex
+ *      and if spSEPARATED_COMPLEX_VECTOR is set true.
  *
  *  >>> Local variables:
- *  Intermediate  (ComplexVector)
+ *  Intermediate  (RealVector)
  *      Temporary storage for use in forward elimination and backward
  *      substitution.  Commonly referred to as c, when the LU factorization
- *      equations are given as  Ax = b, Lc = b, Ux = c.  Local version of
- *      Matrix->Intermediate, which was created during
- *      the initial factorization in function CreateInternalVectors() in the
- *      matrix factorization module.
+ *      equations are given as  Ax = b, Lc = b, Ux = c Local version of
+ *      Matrix->Intermediate, which was created during the initial
+ *      factorization in function CreateInternalVectors() in the matrix
+ *      factorization module.
  *  pElement  (ElementPtr)
  *      Pointer used to address elements in both the lower and upper triangle
  *      matrices.
@@ -587,7 +565,7 @@ void SolveComplexTransposedMatrix();
  *      Pointer that points to current pivot or diagonal element.
  *  Size  (int)
  *      Size of matrix. Made local to reduce indirection.
- *  Temp  (ComplexNumber)
+ *  Temp  (RealNumber)
  *      Temporary storage for entries in arrays.
  *
  *  >>> Obscure Macros
@@ -597,96 +575,77 @@ void SolveComplexTransposedMatrix();
  *      without a trace.
  */
 
-static void
-SolveComplexTransposedMatrix(Matrix, RHS, Solution IMAG_VECTORS )
+/*VARARGS3*/
 
-MatrixPtr  Matrix;
+void spsolve( eMatrix, RHS, Solution IMAG_VECTORS )
+char *eMatrix;
 RealVector  RHS, Solution IMAG_VECTORS;
 {
+MatrixPtr  Matrix = (MatrixPtr)eMatrix;
 register  ElementPtr  pElement;
-register  ComplexVector  Intermediate;
+register  RealVector  Intermediate;
+register  RealNumber  Temp;
 register  int  I, *pExtOrder, Size;
-register  ComplexVector  ExtVector;
 ElementPtr  pPivot;
-ComplexNumber  Temp;
+void SolveComplexMatrix();
 
-/* Begin `SolveComplexTransposedMatrix'. */
+/* Begin `spsolve'. */
+    ASSERT( IS_VALID(Matrix) AND IS_FACTORED(Matrix) );
 
+#if spCOMPLEX
+    if (Matrix->Complex)
+    {   SolveComplexMatrix( Matrix, RHS, Solution IMAG_VECTORS );
+        return;
+    }
+#endif
+
+#if REAL
+    Intermediate = Matrix->Intermediate;
     Size = Matrix->Size;
-    Intermediate = (ComplexVector)Matrix->Intermediate;
 
 /* Correct array pointers for ARRAY_OFFSET. */
 #if NOT ARRAY_OFFSET
-#if spSEPARATED_COMPLEX_VECTORS
-    --RHS;      --iRHS;
-    --Solution; --iSolution;
-#else
-    RHS -= 2;   Solution -= 2;
-#endif
+    --RHS;
+    --Solution;
 #endif
 
 /* Initialize Intermediate vector. */
-    pExtOrder = &Matrix->IntToExtColMap[Size];
-
-#if spSEPARATED_COMPLEX_VECTORS
+    pExtOrder = &Matrix->IntToExtRowMap[Size];
     for (I = Size; I > 0; I--)
-    {   Intermediate[I].Real = RHS[*(pExtOrder)];
-        Intermediate[I].Imag = iRHS[*(pExtOrder--)];
-    }
-#else
-    ExtVector = (ComplexVector)RHS;
-    for (I = Size; I > 0; I--)
-        Intermediate[I] = ExtVector[*(pExtOrder--)];
-#endif
+        Intermediate[I] = RHS[*(pExtOrder--)];
 
-/* Forward elimination. */
+/* Forward elimination. Solves Lc = b.*/
     for (I = 1; I <= Size; I++)
-    {   Temp = Intermediate[I];
-
+    {   
 /* This step of the elimination is skipped if Temp equals zero. */
-        if ((Temp.Real != 0.0) OR (Temp.Imag != 0.0))
-        {   pElement = Matrix->Diag[I]->NextInRow;
+        if ((Temp = Intermediate[I]) != 0.0)
+        {   pPivot = Matrix->Diag[I];
+            Intermediate[I] = (Temp *= pPivot->Real);
+
+            pElement = pPivot->NextInCol;
             while (pElement != NULL)
-            {
-/* Cmplx expr: Intermediate[Element->Col] -= Temp * *Element. */
-                CMPLX_MULT_SUBT_ASSIGN( Intermediate[pElement->Col],
-                                        Temp, *pElement);
-                pElement = pElement->NextInRow;
+            {   Intermediate[pElement->Row] -= Temp * pElement->Real;
+                pElement = pElement->NextInCol;
             }
         }
     }
 
-/* Backward Substitution. */
+/* Backward Substitution. Solves Ux = c.*/
     for (I = Size; I > 0; I--)
-    {   pPivot = Matrix->Diag[I];
-        Temp = Intermediate[I];
-        pElement = pPivot->NextInCol;
-
+    {   Temp = Intermediate[I];
+        pElement = Matrix->Diag[I]->NextInRow;
         while (pElement != NULL)
-        {
-/* Cmplx expr: Temp -= Intermediate[Element->Row] * *Element. */
-            CMPLX_MULT_SUBT_ASSIGN(Temp,Intermediate[pElement->Row],*pElement);
-
-            pElement = pElement->NextInCol;
+        {   Temp -= pElement->Real * Intermediate[pElement->Col];
+            pElement = pElement->NextInRow;
         }
-/* Cmplx expr: Intermediate = Temp * (1.0 / *pPivot). */
-        CMPLX_MULT(Intermediate[I], Temp, *pPivot);
+        Intermediate[I] = Temp;
     }
 
 /* Unscramble Intermediate vector while placing data in to Solution vector. */
-    pExtOrder = &Matrix->IntToExtRowMap[Size];
-
-#if spSEPARATED_COMPLEX_VECTORS
+    pExtOrder = &Matrix->IntToExtColMap[Size];
     for (I = Size; I > 0; I--)
-    {   Solution[*(pExtOrder)] = Intermediate[I].Real;
-        iSolution[*(pExtOrder--)] = Intermediate[I].Imag;
-    }
-#else
-    ExtVector = (ComplexVector)Solution;
-    for (I = Size; I > 0; I--)
-        ExtVector[*(pExtOrder--)] = Intermediate[I];
-#endif
+        Solution[*(pExtOrder--)] = Intermediate[I];
 
     return;
+#endif /* REAL */
 }
-#endif /* TRANSPOSE AND spCOMPLEX */
